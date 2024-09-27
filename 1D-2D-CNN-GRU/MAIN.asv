@@ -1,0 +1,232 @@
+clc
+clear 
+
+%% 导入数据
+TrainData = xlsread('训练数据.xlsx'); 
+TestData  = xlsread('测试数据.xlsx'); 
+
+%% 训练集处理%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% 时序信号处理
+TrainFeature =  TrainData(1:12, :);                         %% 特征
+TrainLabel   =  categorical(TrainData(13, :));              %% 标签
+M = size(TrainLabel,2);
+
+%% 平铺特征数据
+Featuredata  = reshape(TrainFeature,1,12,1,37);   
+
+%% 时序数据格式转换
+NumSample  = 37;                                  %% 样本个数
+for i=1:NumSample
+    SequenceSamples{i,1} = Featuredata(:,:,1,i);
+end
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+%% 构建图像输入结构
+% 指定图像文件夹路径
+imageDataFolder = '训练集';
+
+% 获取文件夹中的图像文件列表
+imageFiles = dir(fullfile(imageDataFolder, '*.png')); % 假设图像文件类型为png
+
+% 提取文件名（不包含文件扩展名）
+fileNames = {imageFiles.name};
+[~, fileNamesWithoutExt] = cellfun(@fileparts, fileNames, 'UniformOutput', false);
+
+% 将文件名转换为数值
+fileIndices = cellfun(@str2double, fileNamesWithoutExt);
+
+% 根据数值进行排序
+[~, idx] = sort(fileIndices);
+sortedFileNames = fileNames(idx);
+
+% 使用排序后的文件名列表创建imageDatastore对象
+imageTtain = imageDatastore(fullfile(imageDataFolder, sortedFileNames),'IncludeSubfolders',true,'LabelSource','foldernames');
+
+%% 构建序列输入结构
+% 故障数值序列
+DecMat = SequenceSamples(:,1);
+SequenceTrain = arrayDatastore(DecMat,"ReadSize",1,"OutputType","same");
+
+ %打标签并数据存储
+labTrain = TrainLabel';                                                              
+LabelTrain = arrayDatastore(labTrain,"ReadSize",1,"OutputType","cell");
+
+%% 合并数值存储块
+TrainDataStore = combine(imageTtain, SequenceTrain, LabelTrain);
+
+%% 测试集处理%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% 时序信号处理
+TestFeature =  TestData(1:200, :);                         %% 特征
+TestLabel   =  categorical(TestData(201, :));              %% 标签
+N = size(TestLabel,2);
+
+%% 平铺特征数据
+Featuredata  = reshape(TestFeature,1,200,1,80);   
+
+%% 时序数据格式转换
+NumSample  = 80;                                           %% 样本个数
+for i=1:NumSample
+    SequenceSamples{i,1} = Featuredata(:,:,1,i);
+end
+
+%% 构建图像输入结构
+% 指定图像文件夹路径
+imageDataFolder = '测试集';
+
+% 获取文件夹中的图像文件列表
+imageFiles = dir(fullfile(imageDataFolder, '*.png')); % 假设图像文件类型为png
+
+% 提取文件名（不包含文件扩展名）
+fileNames = {imageFiles.name};
+[~, fileNamesWithoutExt] = cellfun(@fileparts, fileNames, 'UniformOutput', false);
+
+% 将文件名转换为数值
+fileIndices = cellfun(@str2double, fileNamesWithoutExt);
+
+% 根据数值进行排序
+[sortedFileIndices, idx] = sort(fileIndices);
+sortedFileNames = fileNames(idx);
+
+% 使用排序后的文件名列表创建imageDatastore对象
+imageTest = imageDatastore(fullfile(imageDataFolder, sortedFileNames),'IncludeSubfolders',true,'LabelSource','foldernames');
+
+%% 构建序列输入结构
+% 故障数值序列
+DecMat = SequenceSamples(:,1);
+SequenceTest = arrayDatastore(DecMat,"ReadSize",1,"OutputType","same");
+
+ %打标签并数据存储
+labTest = TestLabel';                                                              
+LabelTest = arrayDatastore(labTest,"ReadSize",1,"OutputType","cell");
+
+%% 合并数值存储块
+TestDataStore = combine(imageTest, SequenceTest, LabelTest);
+
+%% %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% 构建 CNN并联GRU 网络
+lgraph = layerGraph();
+
+% 添加层分支, 将网络分支添加到层次图中。每个分支均为一个线性层组。
+tempLayers = [
+    imageInputLayer([227 227 3],"Name","data_1","Normalization","zscore")
+    convolution2dLayer([3 3],64,"Name","conv1_1","BiasLearnRateFactor",0,"Padding",[3 3 3 3],"Stride",[2 2])
+    batchNormalizationLayer("Name","bn_conv1_1")
+    reluLayer("Name","conv1_relu_1")
+    maxPooling2dLayer([3 3],"Name","pool1_1","Padding",[1 1 1 1],"Stride",[2 2])
+    fullyConnectedLayer(128,"Name","fc")
+    flattenLayer("Name","flatten_2")];
+lgraph = addLayers(lgraph,tempLayers);
+
+tempLayers = [
+    imageInputLayer([1 200],"Name","data","Normalization","zscore")
+    flattenLayer("Name","flatten_1")
+    gruLayer(128,"Name","gru")];
+lgraph = addLayers(lgraph,tempLayers);
+
+tempLayers = [
+    additionLayer(2,"Name","addition")
+    fullyConnectedLayer(8,"Name","fc1000")
+    softmaxLayer("Name","prob")
+    classificationLayer("Name","ClassificationLayer_predictions")];
+lgraph = addLayers(lgraph,tempLayers);
+
+% 清理辅助变量
+clear tempLayers;
+
+% 连接层分支, 连接网络的所有分支以创建网络图。
+lgraph = connectLayers(lgraph,"gru","addition/in1");
+lgraph = connectLayers(lgraph,"flatten_2","addition/in2");
+
+%% 网络选项
+options = trainingOptions('adam', ...
+    'MiniBatchSize',15, ...
+    'InitialLearnRate',0.005, ...
+    'MaxEpochs',10, ...
+    'Shuffle','every-epoch', ...
+    'Verbose',false, ...
+    'Plots','training-progress');
+analyzeNetwork(lgraph);                  %分析网络结构
+
+%% 训练网络
+[netTransfer,info] = trainNetwork(TrainDataStore,lgraph,options);
+
+%% 网络测试
+T_smi1 = classify(netTransfer,TrainDataStore);
+T_smi2 = classify(netTransfer,TestDataStore);
+
+%% 性能评价
+accuracy1 = sum(T_smi1 == labTrain)/numel(labTrain)*100;
+accuracy2 = sum(T_smi2 == labTest)/numel(labTest)*100;
+
+%% 训练集绘图
+figure
+confusionchart(labTrain,T_smi1)
+string={['训练集测试精度=' num2str(accuracy1) '%']};
+title(string)
+
+%% 测试集绘图
+figure
+plot(1:N,labTest,'r*',1:N,T_smi2,'bo','LineWidth',1);
+legend('真实值','预测值');
+xlabel('预测样本');
+ylabel('预测结果');
+xlim([0,N]);
+string={'测试集预测结果对比';['准确率=' num2str(accuracy2) '%']};
+title(string)
+
+%% 绘制混淆矩阵
+figure
+confusionchart(labTest, categorical(T_smi2));
+string={['测试集精度=' num2str(accuracy2) '%']};
+title(string)
+h= plotconfusion(categorical(T_smi2), labTest);
+title('测试集的混淆矩阵');
+xlabel('预测输出类别');
+ylabel('真实所属类别');
+grid
+
+%% 精度计算
+% 将 categorical 数据转换为数值数组
+T_test_num = double(labTest);
+bestPred_num = double(T_smi2);
+
+% 计算混淆矩阵
+confMat = confusionmat(T_test_num, bestPred_num);
+
+% 计算总样本数 N
+N = numel(T_test_num);
+
+% 计算精确度
+accuracy2 = sum(diag(confMat)) / N;
+
+% 计算召回率和精确率
+recall = zeros(1, 8);
+precision = zeros(1, 8);
+for i = 1:8
+    actual_positive = sum(T_test_num == i);
+    true_positive = confMat(i, i);
+    recall(i) = true_positive / actual_positive;
+    precision(i) = true_positive / sum(bestPred_num == i);
+end
+
+% 计算F1分数
+F1_score = 2 * (precision .* recall) ./ (precision + recall);
+
+%% 显示测试结果
+disp(['测试总样本数：', num2str((N)), '个']);
+disp(['精确度：', num2str((accuracy2.*100)), '  （%）']);
+disp(['召回率：', num2str((recall.*100)), '  （%）']);
+disp(['精确率：', num2str((precision.*100)), '  （%）']);
+disp(['F1分数：', num2str((F1_score.*100)), '  （%）']);
